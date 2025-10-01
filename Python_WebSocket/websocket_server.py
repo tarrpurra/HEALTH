@@ -406,22 +406,21 @@ class LiveAPIWebSocketServer:
     # ---------- Summarize & store function ----------
     async def summarize_and_store(self, client_id: str, uid: str):
         """
-        Summarizes the full transcript for a client and sends it to the Node.js backend.
+        Summarizes the full transcript with a focus on clinical, user-reported health data
+        and sends it to the Node.js backend.
         """
         transcript = self.session_transcripts.get(client_id, [])
         if not transcript:
             logger.info("No transcript found; skipping summary.")
             return None
 
-        # Extract user's name from the first user message
+        # This part for extracting user name remains the same
         user_name = None
         for message in transcript:
             if message.get("role") == "user":
-                # This is a simple heuristic to find the name.
-                # A more robust solution would use named entity recognition.
                 text = message.get("text", "").lower()
                 if "my name is" in text:
-                    user_name = text.split("my name is")[-1].strip()
+                    user_name = text.split("my name is")[-1].strip().title()
                     break
         
         if user_name:
@@ -430,7 +429,7 @@ class LiveAPIWebSocketServer:
             except requests.exceptions.RequestException as e:
                 logger.error(f"Error saving user name: {e}")
 
-        # Fetch previous summary
+        # This part for fetching previous summary remains the same
         previous_summary = ""
         try:
             response = requests.get(f"http://localhost:3000/get-summary/{uid}")
@@ -439,95 +438,46 @@ class LiveAPIWebSocketServer:
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching previous summary: {e}")
 
-        # Prepare a compact transcript string (role: text)
-        flat_lines = []
-        for turn in transcript:
-            role = turn.get("role", "user")
-            text = turn.get("text", "").strip()
-            if text:
-                flat_lines.append(f"{role.upper()}: {text}")
-        flat_transcript = "\n".join(flat_lines)
+        flat_transcript = "\n".join(
+            f"{turn.get('role', 'user').upper()}: {turn.get('text', '').strip()}"
+            for turn in transcript if turn.get("text", "").strip()
+        )
 
         session_handle = self.session_ids.get(client_id)
 
-        # Instruction to produce STRICT JSON (no clinical diagnoses)
-        system_note = (
-            'Provide details about health and wellness and answer the questions asked. '
-        )
-
-        # JSON schema we want (kept simple and extensible)
+        # --- UPDATED SCHEMA: More Medical Background ---
+        # This schema focuses on capturing objective, user-reported clinical information.
         schema_hint = {
             "session_id": session_handle or "",
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "language": "auto",
-            "summary": "",
-            "main_points": [],
-            "emotions_themes": [],
-            "mood": "",
-            "mood_percentage": 0,  # 0-100 scale (0 = very poor mood, 100 = excellent mood)
-            "energy_level": 0,  # 0-100 scale (0 = very low energy, 100 = very high energy)
-            "stress_level": 0,  # 0-100 scale (0 = no stress, 100 = extreme stress)
-            "mood_stability": "",  # e.g., "stable", "fluctuating", "improving"
-            "mood_calmness": "",  # e.g., "calm", "anxious", "agitated"
-            "cognitive_score": 0,  # 0-100 scale
-            "emotional_score": 0,  # 0-100 scale
-              "sleep_quality": None,  # e.g., "Rested", "Okay", "Exhausted"
-            "sleep_duration_hours": None,  # numeric hours slept (allow decimals)
-            "social_connection_level": None,  # e.g., "Feeling Connected", "Feeling Isolated"
-            "social_interaction_log": None,  # yes/no or note on interactions
-            "physical_activity_minutes": None,  # minutes of movement (0 if none)
-            "physical_activity_summary": None,  # short descriptor of activity effort
-            "anxiety_level": None,  # 0-100 scale distinct from stress
-            "focus_level": None,  # e.g., "Focused", "Distracted"
-            "positive_event": None,  # gratitude or positive highlight
-            "stressors": [],
-            "protective_factors": [],
-            "coping_strategies_discussed": [],
-            "goals_or_hopes": [],
-            "action_items_suggested": [],
-            "progress_analysis": "",
+            "disclaimer": "This is an AI-generated summary based on user conversation and is NOT a medical record.",
+            "summary_of_interaction": "",  # A brief, top-level summary of the conversation's purpose and outcome.
+            "reported_symptoms": [],  # List all symptoms mentioned by the user (e.g., "Fever", "Persistent cough").
+            "symptom_details": "",  # A descriptive paragraph detailing symptom onset, duration, severity, and triggers as described by the user.
+            "mentioned_medical_history": [],  # Any past conditions or surgeries the user mentioned (e.g., "Diabetes since 2010").
+            "mentioned_medications": [],  # Any medications the user reported taking.
+            "physical_assessment_notes": "",  # Notes on any physical observations the user describes (e.g., "mentioned a rash on their arm").
+            "triage_recommendation": "",  # The final recommendation given by the bot (e.g., "Advised to see a doctor immediately").
             "risk_flags": {
                 "mentions_self_harm": False,
                 "mentions_harming_others": False,
                 "mentions_abuse_or_unsafe": False,
-                "urgent_support_recommended": False
-            },
-            "suggestions_non_clinical": [],
-            "suggested_exercises": ["ex001","ex002","ex003"],
+                "is_urgent_medical_situation": False  # Flag for symptoms like chest pain, difficulty breathing, etc.
+            }
         }
 
+        # --- UPDATED PROMPT: Aligned with Medical Schema ---
+        # This prompt instructs the AI to act as a clinical information extractor, not a diagnostician.
         user_prompt = (
-            "Analyze the following conversation transcript and combine it with the previous summary to create an updated summary. "
-            "The updated summary should reflect the user's progress and current wellness state. "
-            "Focus on the youth's wellness state and the core points discussed. "
-            "If a previous summary is provided, analyze the user's progress over time in the 'progress_analysis' field. "
-            "Infer language if not explicit. "
-            "Analyze the overall mood of the user based on their messages and provide: "
-            "- A brief description in the 'mood' field (e.g., positive, neutral, anxious, hopeful, struggling, resilient). "
-            "- A mood percentage on a scale of 0-100 in the 'mood_percentage' field (0 = very poor mood/distressed, 100 = excellent mood/thriving). "
-            "  IMPORTANT: Consider ALL factors when calculating mood percentage - stress, energy, behavioral lifestyle metrics, protective factors, and overall functioning. "
-            "  Use the holistic scoring guidelines: Factor in conversational tone (30%), stress levels (25%), energy levels (20%), behavioral metrics (15%), and cognitive functioning (10%). "
-            "  The mood percentage should NEVER be negative and must be between 0-100. "
-            "- An energy level on a scale of 0-100 in the 'energy_level' field (0 = very low energy, 100 = very high energy). "
-            "- A stress level on a scale of 0-100 in the 'stress_level' field (0 = no stress, 100 = extreme stress). "
-            "- Mood stability assessment in the 'mood_stability' field (e.g., stable, fluctuating, improving, declining). "
-            "- Mood calmness level in the 'mood_calmness' field (e.g., calm, anxious, agitated, relaxed). "
-            "- A 'cognitive_score' on a 0-100 scale, derived from the user's focus level, clarity of thought, and problem-solving mentions. "
-            "- An 'emotional_score' on a 0-100 scale, based on mood calmness, stability, and emotional articulation. "
-                "Capture lifestyle patterns by filling the behavioral metrics: "
-            "- 'sleep_quality' as a short descriptor like Rested/Okay/Exhausted and 'sleep_duration_hours' as a numeric value. "
-            "- 'social_connection_level' describing their connected vs. isolated feelings and 'social_interaction_log' as a yes/no or short note. "
-            "- 'physical_activity_minutes' representing minutes moved (0 if none) and 'physical_activity_summary' with a short description of the movement effort. "
-            "Document cognitive and emotional granularity: "
-            "- 'anxiety_level' on a 0-100 scale distinct from stress (0 = no anxiety, 100 = extreme anxiety). "
-            "- 'focus_level' describing their concentration (e.g., Focused, Distracted, Scattered). "
-            "- 'positive_event' capturing a gratitude or positive moment noted by the user. "
-            "Use the behavioral and cognitive metrics (sleep quality, social connection, physical activity), along with mood, energy, and stress, when estimating 'mood_percentage'. "
-            "Apply holistic scoring: Start with a base score from conversational tone, then adjust based on stress levels, energy levels, behavioral metrics, and cognitive functioning. "
-            "Consider protective factors like support systems, coping strategies, and resilience indicators when determining the final mood percentage. "
-            "Remember: mood_percentage must be 0-100 (never negative), representing overall mental wellness state, not just immediate emotional expression. "
-            "If information is not provided, set the corresponding field to null. "
-            "Fill the provided JSON schema faithfully and only return the JSON object.\n\n"
+            "You are a clinical assistant analyzing a conversation with a user from a RURAL area. "
+            "Your role is to EXTRACT and ORGANIZE medical information provided by the user. DO NOT provide a diagnosis or medical opinion. "
+            "Analyze the following transcript to populate the provided JSON schema. "
+            "In 'symptom_details', describe the symptoms including onset, duration, and severity as stated by the user. "
+            "In 'triage_recommendation', record the final advice the bot gave. "
+            "Set 'is_urgent_medical_situation' to true if the user describes life-threatening symptoms (e.g., chest pain, difficulty breathing, uncontrolled bleeding, severe confusion). "
+            "Be precise and objective, using only information from the transcript. "
+            "Return ONLY the completed JSON object."
+            "\n\n"
             f"PREVIOUS_SUMMARY:\n{previous_summary}\n\n"
             f"JSON_SCHEMA_EXAMPLE:\n{json.dumps(schema_hint, ensure_ascii=False, indent=2)}\n\n"
             f"TRANSCRIPT:\n{flat_transcript}"

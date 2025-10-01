@@ -1,0 +1,15 @@
+asyncio
+websockets
+python-dotenv
+numpy
+scipy
+google-genai
+pinecone
+requests
+sentence-transformers
+tqdm
+pipecat-ai[cartesia,silero,deepgram,google]
+fastapi
+uvicorn
+loguru
+twilio

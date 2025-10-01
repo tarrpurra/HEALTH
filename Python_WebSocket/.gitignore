@@ -1,0 +1,5 @@
+Resources/
+__pycache__/
+Phone/
+.env
+service-account.json
